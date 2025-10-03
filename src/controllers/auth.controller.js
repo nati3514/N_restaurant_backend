@@ -1,11 +1,10 @@
 const { CONFIG } = require("../config");
 const { mailTransport } = require("../config/mailTransport");
-const { signInDB, removeRefreshTokenDB, addRefreshTokenDB, verifyRefreshTokenDB, removeRefreshTokenByDeviceIdDB, getDevicesDB, checkEmailExistsDB, signUpDB, updateTenantSubscriptionAccess, getSubscriptionDetailsDB, getUserDB, forgotPasswordDB, checkForgotPasswordTokenDB, deleteForgotPasswordTokenDB , updateSubscriptionHistory , getTenantIdFromCustomerEmail} = require("../services/auth.service");
+const { signInDB, removeRefreshTokenDB, addRefreshTokenDB, verifyRefreshTokenDB, removeRefreshTokenByDeviceIdDB, getDevicesDB, checkEmailExistsDB, signUpDB, updateTenantSubscriptionAccess, getSubscriptionDetailsDB, getUserDB, forgotPasswordDB, checkForgotPasswordTokenDB, deleteForgotPasswordTokenDB, updateSubscriptionHistory, getTenantIdFromCustomerEmail } = require("../services/auth.service");
 const { generateAccessToken, generateRefreshToken } = require("../utils/jwt");
 const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const { deleteUserRefreshTokensDB, updateUserPasswordDB } = require("../services/user.service");
-const stripe = require('stripe')(CONFIG.STRIPE_SECRET);
 
 exports.signIn = async (req, res) => {
     try {
@@ -427,21 +426,16 @@ exports.getSubscriptionDetails = async (req, res) => {
 exports.cancelSubscription = async (req, res) => {
     try {
         const user = req.user;
-        const id = req.body.id;
+        
+        // Update subscription status in database
+        await updateTenantSubscriptionAccess({
+            tenant_id: user.tenant_id,
+            is_active: 0,
+            subscription_plan: null,
+            subscription_end_date: null
+        });
 
-        if(!id) {
-            return res.status(400).json({
-                success: false,
-                message: req.__("invalid_request") // Translate message
-            });
-        }
-
-        const subscription = await stripe.subscriptions.cancel(
-            id
-        );
-
-        // generate new access token
-        // set cookie
+        // Update user's access token to reflect subscription status
         const cookieOptions = {
             expires: new Date(Date.now() + parseInt(CONFIG.COOKIE_EXPIRY)),
             httpOnly: true,
@@ -450,6 +444,7 @@ exports.cancelSubscription = async (req, res) => {
             secure: process.env.NODE_ENV == "production",
             path: "/"
         };
+        
         const payload = {
             tenant_id: user.tenant_id,
             is_active: 0,
@@ -457,67 +452,60 @@ exports.cancelSubscription = async (req, res) => {
             name: user.name,
             role: user.role,
             scope: user.scope,
-        }
+        };
+        
         const accessToken = generateAccessToken(payload);
-
         res.cookie('accessToken', accessToken, cookieOptions);
 
         return res.status(200).json({
             success: true,
-            message: req.__("subscription_cancelled_no_longer_charged") // Translate message
+            message: req.__("subscription_cancelled_successfully")
         });
 
     } catch (error) {
         console.error(error);
         return res.status(500).json({
             success: false,
-            message: req.__("something_went_wrong_try_later") // Translate message
+            message: req.__("something_went_wrong_try_later")
         });
     }
 };
 
-exports.stripeProductSubscriptionLookup = async (req, res) => {
+// Simple subscription activation endpoint
+exports.activateSubscription = async (req, res) => {
     try {
-        const productId = req.body.id;
         const user = req.user;
-
-        // const prices = await stripe.prices.list({
-        //     lookup_keys: [productId],
-        //     expand: ['data.product'],
-        // });
-
-        // console.log(prices);
-
-        const session = await stripe.checkout.sessions.create({
-            billing_address_collection: 'auto',
-            customer_email: user.username,
-            metadata: {
-                tenant_id: user.tenant_id,
-            },
-            line_items: [
-                {
-                    price: productId,
-                    // price: prices.data[0].id,
-                    quantity: 1,
-                },
-            ],
-            mode: 'subscription',
-            success_url: `${CONFIG.FRONTEND_DOMAIN}/success?session_id={CHECKOUT_SESSION_ID}`,
-            cancel_url: `${CONFIG.FRONTEND_DOMAIN}/cancelled-payment`,
+        const planId = req.body.planId; // e.g., 'basic', 'premium', etc.
+        
+        // Default to 30 days from now
+        const subscriptionEndDate = new Date();
+        subscriptionEndDate.setDate(subscriptionEndDate.getDate() + 30);
+        
+        // Update the subscription in your database
+        await updateTenantSubscriptionAccess({
+            tenant_id: user.tenant_id,
+            is_active: 1,
+            subscription_plan: planId,
+            subscription_end_date: subscriptionEndDate
         });
-
+        
         return res.status(200).json({
             success: true,
-            url: session.url,
+            message: "Subscription activated successfully",
+            data: {
+                plan: planId,
+                active: true,
+                end_date: subscriptionEndDate
+            }
         });
     } catch (error) {
-        console.log(error);
+        console.error(error);
         return res.status(500).json({
             success: false,
-            message: req.__("cant_retrieve_product_subscription_try_later") // Translate message
+            message: req.__("failed_to_activate_subscription")
         });
     }
-}
+};
 
 exports.stripeWebhook = async (request, response) => {
     let event = request.body;
