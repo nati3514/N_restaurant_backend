@@ -333,23 +333,53 @@ exports.getSubscriptionDetailsDB = async (tenantId) => {
     }
 };
 
-exports.updateTenantSubscriptionAccess = async (email, status, subscriptionId, paymentCustomerId, subscriptionStartTimestamp, subscriptionEndTimestamp) => {
+exports.updateTenantSubscriptionAccess = async (params) => {
     const conn = await getMySqlPromiseConnection();
 
     try {
-        const sql = `
-        UPDATE tenants
-        SET is_active = ?, subscription_id = ?, payment_customer_id = ?, subscription_start = ?, subscription_end = ?
-        WHERE id = (
-            SELECT tenant_id FROM users
-            WHERE username = ?
-        )
-        `;
+        // Handle both old and new parameter formats
+        let tenantId, isActive, subscriptionPlan, subscriptionEndDate;
+        
+        if (typeof params === 'object') {
+            // New format: { tenant_id, is_active, subscription_plan, subscription_end_date }
+            tenantId = params.tenant_id;
+            isActive = params.is_active;
+            
+            // Store the plan in the subscription_id column since subscription_plan doesn't exist
+            subscriptionPlan = params.subscription_plan || null;
+            subscriptionEndDate = params.subscription_end_date || null;
+            
+            const sql = `
+            UPDATE tenants 
+            SET is_active = ?,
+                subscription_id = ?,
+                subscription_end = ?
+            WHERE id = ?;
+            `;
+            
+            await conn.query(sql, [isActive, subscriptionPlan, subscriptionEndDate, tenantId]);
+        } else {
+            // Old format for backward compatibility
+            const [email, status, subscriptionId, paymentCustomerId, subscriptionStartTimestamp, subscriptionEndTimestamp] = params;
+            
+            const sql = `
+            UPDATE tenants
+            SET is_active = ?, 
+                subscription_id = ?, 
+                payment_customer_id = ?, 
+                subscription_start = ?, 
+                subscription_end = ?
+            WHERE id = (
+                SELECT tenant_id FROM users
+                WHERE username = ?
+            )`;
 
-        await conn.query(sql, [status, subscriptionId, paymentCustomerId, subscriptionStartTimestamp, subscriptionEndTimestamp, email]);
+            await conn.query(sql, [status, subscriptionId, paymentCustomerId, subscriptionStartTimestamp, subscriptionEndTimestamp, email]);
+        }
+        
         return;
     } catch (error) {
-        console.error(error);
+        console.error('Error in updateTenantSubscriptionAccess:', error);
         throw error;
     } finally {
         conn.release();
